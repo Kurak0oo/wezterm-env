@@ -6,7 +6,7 @@ param(
 $candidates = @(
     (Join-Path $InstallDir 'wezterm-gui.exe'),
     (Join-Path $InstallDir 'wezterm.exe'),
-    'C:\src\wezterm-cursor-trail\target\release\wezterm-gui.exe'
+    'C:\Users\Personal\Projects\wezterm-cursor-trail\target\release\wezterm-gui.exe'
 )
 
 $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1

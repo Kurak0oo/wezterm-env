@@ -125,7 +125,7 @@ $trailInstall = Join-Path $env:LOCALAPPDATA 'WezTerm-Trail'
 if ($WithCursorTrail) {
     Write-Host "=== Cursor trail WezTerm ==="
     $gui = Join-Path $trailInstall 'wezterm-gui.exe'
-    $haveLocal = Test-Path 'C:\src\wezterm-cursor-trail\target\release\wezterm-gui.exe'
+    $haveLocal = Test-Path 'C:\Users\Personal\Projects\wezterm-cursor-trail\target\release\wezterm-gui.exe'
 
     if ($BuildTrailFromSource) {
         & (Join-Path $RepoRoot 'scripts\Build-WezTerm-Trail.ps1') -InstallDir $trailInstall
@@ -150,12 +150,12 @@ if ($WithCursorTrail) {
         }
 
         if (-not $gotRelease -and $haveLocal) {
-            Write-Host "  Copying local build from C:\src\wezterm-cursor-trail ..."
+            Write-Host "  Copying local build from C:\Users\Personal\Projects\wezterm-cursor-trail ..."
             New-Item -ItemType Directory -Force -Path $trailInstall | Out-Null
-            Copy-Item 'C:\src\wezterm-cursor-trail\target\release\wezterm.exe' $trailInstall -Force
-            Copy-Item 'C:\src\wezterm-cursor-trail\target\release\wezterm-gui.exe' $trailInstall -Force
-            if (Test-Path 'C:\src\wezterm-cursor-trail\target\release\wezterm-mux-server.exe') {
-                Copy-Item 'C:\src\wezterm-cursor-trail\target\release\wezterm-mux-server.exe' $trailInstall -Force
+            Copy-Item 'C:\Users\Personal\Projects\wezterm-cursor-trail\target\release\wezterm.exe' $trailInstall -Force
+            Copy-Item 'C:\Users\Personal\Projects\wezterm-cursor-trail\target\release\wezterm-gui.exe' $trailInstall -Force
+            if (Test-Path 'C:\Users\Personal\Projects\wezterm-cursor-trail\target\release\wezterm-mux-server.exe') {
+                Copy-Item 'C:\Users\Personal\Projects\wezterm-cursor-trail\target\release\wezterm-mux-server.exe' $trailInstall -Force
             }
         } elseif (-not $gotRelease) {
             Write-Warning @"
