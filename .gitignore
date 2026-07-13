@@ -1,0 +1,17 @@
+# Local only
+*.bak.*
+.DS_Store
+Thumbs.db
+
+# Never commit WezTerm binaries or huge wallpapers
+*.exe
+*.pdb
+*.zip
+target/
+assets/backgrounds/*.jpg
+assets/backgrounds/*.png
+assets/backgrounds/*.webp
+!assets/backgrounds/README.md
+
+# Local clone of upstream wezterm
+wezterm-cursor-trail/

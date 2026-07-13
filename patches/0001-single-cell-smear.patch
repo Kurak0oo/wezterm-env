@@ -1,0 +1,18 @@
+diff --git a/wezterm-gui/src/termwindow/cursortrail.rs b/wezterm-gui/src/termwindow/cursortrail.rs
+index 3e718a3b5..6c72bf14c 100644
+--- a/wezterm-gui/src/termwindow/cursortrail.rs
++++ b/wezterm-gui/src/termwindow/cursortrail.rs
+@@ -558,7 +558,12 @@ impl CursorTrailState {
+                 }
+                 Phase::Hold
+             } else if dx + dy > 0 {
+-                Phase::Snap
++                // Single-cell moves (typing, left/right arrows, hjkl): arm a
++                // short smear from the previous cell instead of snapping.
++                // Without this, only multi-cell jumps (vim G, long word hops)
++                // ever deformed - character navigation looked static.
++                // Multi-cell path above still uses Hold/defer for btop safety.
++                Phase::Arm(self.prev_pos)
+             } else {
+                 Phase::Tick
+             };
