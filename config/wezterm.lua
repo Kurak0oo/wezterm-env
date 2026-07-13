@@ -136,7 +136,7 @@ config.window_padding = {
   top = '0.35cell',
   bottom = '0.35cell',
 }
-config.window_decorations = 'INTEGRATED_BUTTONS | RESIZE'
+config.window_decorations = 'TITLE | RESIZE'
 config.window_close_confirmation = 'NeverPrompt'
 config.hide_tab_bar_if_only_one_tab = true
 config.use_fancy_tab_bar = false
