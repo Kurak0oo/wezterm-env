@@ -7,7 +7,18 @@ local config = wezterm.config_builder()
 -- ============================================================================
 -- SHELL
 -- ============================================================================
-config.default_prog = { 'pwsh.exe', '-NoLogo' }
+-- Prefer PowerShell 7; fall back to Windows PowerShell on locked/minimal PCs.
+if wezterm.target_triple and wezterm.target_triple:find('windows') then
+  -- Probe is not available at config time; try pwsh first (WezTerm finds it on PATH).
+  config.default_prog = { 'pwsh.exe', '-NoLogo' }
+else
+  config.default_prog = { 'pwsh', '-NoLogo' }
+end
+-- If pwsh is missing, set in your local override:
+-- config.default_prog = { 'powershell.exe', '-NoLogo' }
+
+-- Avoid noisy "didn't exit cleanly" when profile/tools return non-zero on close
+config.exit_behavior = 'Close'
 
 -- ============================================================================
 -- FONT

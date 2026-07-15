@@ -1,32 +1,42 @@
 # =============================================================================
-# PowerShell 7+ Profile - WezTerm + Oh My Posh (portable)
+# PowerShell 7+ Profile - WezTerm + Oh My Posh (portable, fail-soft)
 # Installed by Kurak0oo/wezterm-env install.ps1 -> $PROFILE
+# Never throws: avoids WezTerm "pwsh exited with code 1" / CloseOnCleanExit noise
 # =============================================================================
 
+$ErrorActionPreference = 'SilentlyContinue'
+
+# Oh My Posh (optional)
 $ompThemeUrl = 'https://raw.githubusercontent.com/JanDeDobbeleer/oh-my-posh/main/themes/catppuccin_mocha.omp.json'
-
-if (Get-Command oh-my-posh -ErrorAction SilentlyContinue) {
-    try {
-        oh-my-posh init pwsh --config $ompThemeUrl | Invoke-Expression
-    } catch {
-        Write-Warning "Oh My Posh init failed: $_"
-        function prompt { "PS $($executionContext.SessionState.Path.CurrentLocation)> " }
+try {
+    if (Get-Command oh-my-posh -ErrorAction SilentlyContinue) {
+        oh-my-posh init pwsh --config $ompThemeUrl 2>$null | Invoke-Expression
     }
-} else {
-    Write-Warning "oh-my-posh not found. Install: winget install JanDeDobbeleer.OhMyPosh"
+} catch {
+    # keep default prompt
 }
 
-if (Get-Module -ListAvailable -Name PSReadLine) {
-    Import-Module PSReadLine -ErrorAction SilentlyContinue
-    Set-PSReadLineOption -EditMode Windows
-    Set-PSReadLineOption -PredictionSource HistoryAndPlugin -ErrorAction SilentlyContinue
-    Set-PSReadLineOption -PredictionViewStyle ListView -ErrorAction SilentlyContinue
-    # Switch params: do NOT pass $true (becomes a stray positional argument)
-    Set-PSReadLineOption -HistorySearchCursorMovesToEnd -ErrorAction SilentlyContinue
-    Set-PSReadLineOption -ShowToolTips -ErrorAction SilentlyContinue
-    Set-PSReadLineOption -BellStyle None -ErrorAction SilentlyContinue
-    Set-PSReadLineKeyHandler -Key Tab -Function MenuComplete -ErrorAction SilentlyContinue
-    Set-PSReadLineKeyHandler -Key 'Ctrl+d' -Function DeleteCharOrExit -ErrorAction SilentlyContinue
-}
+# PSReadLine (optional)
+try {
+    if (Get-Module -ListAvailable -Name PSReadLine) {
+        Import-Module PSReadLine -ErrorAction SilentlyContinue
+        Set-PSReadLineOption -EditMode Windows -ErrorAction SilentlyContinue
+        Set-PSReadLineOption -PredictionSource History -ErrorAction SilentlyContinue
+        # HistoryAndPlugin may fail on older PSReadLine — fall back already History
+        Set-PSReadLineOption -PredictionViewStyle ListView -ErrorAction SilentlyContinue
+        # Switch parameters: do NOT pass $true
+        Set-PSReadLineOption -HistorySearchCursorMovesToEnd -ErrorAction SilentlyContinue
+        Set-PSReadLineOption -ShowToolTips -ErrorAction SilentlyContinue
+        Set-PSReadLineOption -BellStyle None -ErrorAction SilentlyContinue
+        Set-PSReadLineKeyHandler -Key Tab -Function MenuComplete -ErrorAction SilentlyContinue
+        Set-PSReadLineKeyHandler -Key 'Ctrl+d' -Function DeleteCharOrExit -ErrorAction SilentlyContinue
+    }
+} catch { }
 
-Set-Alias -Name which -Value Get-Command -ErrorAction SilentlyContinue
+try {
+    Set-Alias -Name which -Value Get-Command -ErrorAction SilentlyContinue
+} catch { }
+
+# Clear leftover error records so shell starts "clean"
+$Error.Clear()
+$global:LASTEXITCODE = 0
