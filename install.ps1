@@ -19,12 +19,22 @@ param(
     [switch]$SkipWinget,
     [switch]$SkipFonts,
     [switch]$BuildTrailFromSource,
-    [string]$RepoRoot = $PSScriptRoot
+    # Do not default to $PSScriptRoot here: with [CmdletBinding()] the automatic
+    # variable is empty during parameter binding, which caused an infinite
+    # re-invoke loop (bootstrap -> Start-Process -> bootstrap ...).
+    [string]$RepoRoot
 )
 
 # Do not stop the whole install on one failed external tool (winget on locked PCs).
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
+
+if (-not $RepoRoot) {
+    $RepoRoot = $PSScriptRoot
+}
+if (-not $RepoRoot -and $MyInvocation.MyCommand.Path) {
+    $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
 
 function Write-Step([string]$Msg) { Write-Host "`n=== $Msg ===" -ForegroundColor Cyan }
 function Write-Ok([string]$Msg) { Write-Host "  [ok] $Msg" -ForegroundColor Green }
@@ -106,16 +116,18 @@ if (-not $RepoRoot -or -not (Test-Path (Join-Path $RepoRoot 'config\wezterm.lua'
         Write-Warn2 "git not in PATH — downloading zip from GitHub"
         Get-RepoViaZip $clone
     }
-    $argList = @()
+    $argList = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', (Join-Path $clone 'install.ps1'),
+        '-RepoRoot', $clone
+    )
     if ($WithCursorTrail) { $argList += '-WithCursorTrail' }
     if ($SkipWinget) { $argList += '-SkipWinget' }
     if ($SkipFonts) { $argList += '-SkipFonts' }
     if ($BuildTrailFromSource) { $argList += '-BuildTrailFromSource' }
-    $installer = Join-Path $clone 'install.ps1'
-    # Re-invoke with Bypass so nested call works under Restricted policy
-    $p = Start-Process -FilePath 'powershell.exe' -ArgumentList (
-        @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installer) + $argList
-    ) -Wait -PassThru -NoNewWindow
+    # Re-invoke with Bypass so nested call works under Restricted policy.
+    # Always pass -RepoRoot so the child never re-enters this bootstrap path.
+    $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Wait -PassThru -NoNewWindow
     exit $p.ExitCode
 }
 
@@ -171,12 +183,18 @@ New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE 'Pictures\
 # ---------------------------------------------------------------------------
 Write-Step "PowerShell profile"
 $profSrc = Join-Path $RepoRoot 'profile\Microsoft.PowerShell_profile.ps1'
-$profDir = Join-Path $env:USERPROFILE 'Documents\PowerShell'
-New-Item -ItemType Directory -Force -Path $profDir | Out-Null
-$profDst = Join-Path $profDir 'Microsoft.PowerShell_profile.ps1'
-Backup-IfExists $profDst
-Copy-Item $profSrc $profDst -Force
-Write-Ok "Wrote $profDst"
+# PS7+ uses Documents\PowerShell; Windows PowerShell 5.1 uses Documents\WindowsPowerShell.
+# With -SkipWinget, machines often only have 5.1 — write both.
+foreach ($profDir in @(
+        (Join-Path $env:USERPROFILE 'Documents\PowerShell'),
+        (Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell')
+    )) {
+    New-Item -ItemType Directory -Force -Path $profDir | Out-Null
+    $profDst = Join-Path $profDir 'Microsoft.PowerShell_profile.ps1'
+    Backup-IfExists $profDst
+    Copy-Item $profSrc $profDst -Force
+    Write-Ok "Wrote $profDst"
+}
 
 # ---------------------------------------------------------------------------
 # 4) Fonts (best-effort)

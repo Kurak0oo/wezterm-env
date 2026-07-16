@@ -7,17 +7,58 @@ local config = wezterm.config_builder()
 -- ============================================================================
 -- SHELL
 -- ============================================================================
--- Prefer PowerShell 7; fall back to Windows PowerShell on locked/minimal PCs.
+-- Prefer PowerShell 7 (pwsh). If missing (common with -SkipWinget / locked PCs),
+-- fall back to Windows PowerShell so the pane does not die with exit code 1 and
+-- "didn't exit cleanly" / CloseOnCleanExit noise.
+local function exe_exists(name)
+  -- where.exe succeeds when the name is on PATH (Windows).
+  if wezterm.run_child_process then
+    local ok = wezterm.run_child_process { 'where.exe', name }
+    if ok then
+      return true
+    end
+  end
+  return false
+end
+
+local function file_exists_path(path)
+  local f = io.open(path, 'rb')
+  if f then
+    f:close()
+    return true
+  end
+  return false
+end
+
 if wezterm.target_triple and wezterm.target_triple:find('windows') then
-  -- Probe is not available at config time; try pwsh first (WezTerm finds it on PATH).
-  config.default_prog = { 'pwsh.exe', '-NoLogo' }
+  local home = wezterm.home_dir or os.getenv('USERPROFILE') or ''
+  local pwsh_candidates = {
+    home .. '\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe',
+    'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+    'C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe',
+  }
+  local have_pwsh = false
+  for _, p in ipairs(pwsh_candidates) do
+    if file_exists_path(p) then
+      config.default_prog = { p, '-NoLogo' }
+      have_pwsh = true
+      break
+    end
+  end
+  if not have_pwsh and exe_exists('pwsh.exe') then
+    config.default_prog = { 'pwsh.exe', '-NoLogo' }
+    have_pwsh = true
+  end
+  if not have_pwsh then
+    config.default_prog = { 'powershell.exe', '-NoLogo' }
+  end
 else
   config.default_prog = { 'pwsh', '-NoLogo' }
 end
--- If pwsh is missing, set in your local override:
--- config.default_prog = { 'powershell.exe', '-NoLogo' }
 
--- Avoid noisy "didn't exit cleanly" when profile/tools return non-zero on close
+-- Close pane on any shell exit (avoids sticky "didn't exit cleanly" banner).
+-- WezTerm default is CloseOnCleanExit, which shows that warning whenever the
+-- shell exits with a non-zero code (missing pwsh, profile errors, etc.).
 config.exit_behavior = 'Close'
 
 -- ============================================================================
@@ -155,6 +196,9 @@ config.tab_bar_at_bottom = false
 config.front_end = 'WebGpu'
 config.webgpu_power_preference = 'HighPerformance'
 config.scrollback_lines = 10000
+-- Kitty keyboard protocol: required for apps (e.g. Grok TUI) that use Shift+Enter
+-- for newlines. Without this, Grok reports "kitty keyboard protocol is off".
+config.enable_kitty_keyboard = true
 config.audible_bell = 'Disabled'
 config.visual_bell = {
   fade_in_duration_ms = 60,

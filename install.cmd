@@ -1,4 +1,3 @@
 @echo off
-REM Double-click or run: install.cmd -WithCursorTrail
-REM Bypasses PowerShell Restricted execution policy on cybercafe / locked PCs.
+REM Always Bypass so Restricted PCs can install
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" %*
