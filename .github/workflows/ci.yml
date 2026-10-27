@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lua:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y lua5.4
+      - name: Syntax-check wezterm.lua
+        run: luac5.4 -p config/wezterm.lua
+
+  powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse every script (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $bad = 0
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors) | Out-Null
+            foreach ($e in $errors) { Write-Host "::error file=$($_.Name)::$($e.Message)"; $bad++ }
+          }
+          if ($bad) { exit 1 }
+
+      - name: PSScriptAnalyzer (errors only)
+        shell: pwsh
+        run: |
+          $r = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error
+          $r | Format-Table -AutoSize
+          if ($r) { exit 1 }
+
+      - name: Install (no winget, with font + trail)
+        shell: cmd
+        run: install.cmd -SkipWinget -WithFont -WithCursorTrail
+
+      - name: Check installed files
+        shell: powershell
+        run: |
+          $docs = [Environment]::GetFolderPath('MyDocuments')
+          $expect = @(
+            "$env:USERPROFILE\.wezterm.lua",
+            "$env:USERPROFILE\.config\wezterm-env\profile.ps1",
+            "$env:LOCALAPPDATA\WezTerm-Trail\wezterm-gui.exe",
+            "$env:LOCALAPPDATA\WezTerm-Trail\Start-WezTerm-CursorTrail.bat"
+          )
+          $missing = $expect | Where-Object { -not (Test-Path $_) }
+          if ($missing) { $missing | ForEach-Object { Write-Host "::error::missing $_" }; exit 1 }
+          foreach ($sub in 'PowerShell', 'WindowsPowerShell') {
+            if (-not (Select-String -Path "$docs\$sub\Microsoft.PowerShell_profile.ps1" -Pattern 'wezterm-env' -Quiet)) { exit 1 }
+          }
+          # Profile must load cleanly in both shells.
+          powershell -NoLogo -Command 'exit 0'; if ($LASTEXITCODE) { exit 1 }
+          pwsh -NoLogo -Command 'exit 0'; if ($LASTEXITCODE) { exit 1 }
+
+      - name: Install again (idempotent, no new backups)
+        shell: cmd
+        run: install.cmd -SkipWinget -WithCursorTrail
+
+      - name: Second run made no backups
+        shell: powershell
+        run: if (Get-ChildItem "$env:USERPROFILE\.wezterm.lua.bak.*" -ErrorAction SilentlyContinue) { exit 1 }
+
+      - name: Uninstall
+        shell: powershell
+        run: |
+          .\uninstall.ps1 -RemoveTrailBinary -RemoveFont
+          if (Test-Path "$env:USERPROFILE\.wezterm.lua") { exit 1 }
+          if (Test-Path "$env:LOCALAPPDATA\WezTerm-Trail") { exit 1 }

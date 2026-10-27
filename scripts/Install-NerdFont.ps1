@@ -1,51 +1,42 @@
-# Install 0xProto Nerd Font for the current user (Windows)
+# Install a Nerd Font for the current user (Windows, no admin needed)
 param(
     [string]$FontFamily = '0xProto'
 )
 
 $ErrorActionPreference = 'Stop'
-$tmp = Join-Path $env:TEMP "nerdfont-$FontFamily"
-$zip = Join-Path $env:TEMP "$FontFamily.zip"
+$ProgressPreference = 'SilentlyContinue'
+
 $fontsUser = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts'
-New-Item -ItemType Directory -Force -Path $fontsUser | Out-Null
+$regKey = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts'
 
-# Official Nerd Fonts release asset naming
-$asset = switch ($FontFamily) {
-    '0xProto' { '0xProto.zip' }
-    'JetBrainsMono' { 'JetBrainsMono.zip' }
-    default { "$FontFamily.zip" }
+$registered = Get-ItemProperty $regKey -ErrorAction SilentlyContinue
+if ($registered -and ($registered.PSObject.Properties.Name -like "$FontFamily*Nerd*Font*")) {
+    Write-Host "$FontFamily Nerd Font is already installed."
+    return
 }
 
-$releaseApi = 'https://api.github.com/repos/ryanoasis/nerd-fonts/releases/latest'
-Write-Host "Resolving latest Nerd Fonts release for $asset ..."
-$rel = Invoke-RestMethod -Uri $releaseApi -Headers @{ 'User-Agent' = 'wezterm-env' }
-$url = ($rel.assets | Where-Object { $_.name -eq $asset } | Select-Object -First 1).browser_download_url
-if (-not $url) {
-    throw "Could not find asset $asset in latest nerd-fonts release."
-}
-
+# Direct "latest" link: no api.github.com call, so no 60/hour rate limit on shared IPs.
+$url = "https://github.com/ryanoasis/nerd-fonts/releases/latest/download/$FontFamily.zip"
+$zip = Join-Path $env:TEMP "$FontFamily.zip"
+$tmp = Join-Path $env:TEMP "nerdfont-$FontFamily"
 Write-Host "Downloading $url"
 Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
 if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
 Expand-Archive -Path $zip -DestinationPath $tmp -Force
 
-$shell = New-Object -ComObject Shell.Application
-$fontsNs = $shell.Namespace(0x14) # Fonts special folder (per-user when available)
-$ttfs = Get-ChildItem -Path $tmp -Recurse -Include *.ttf, *.otf -ErrorAction SilentlyContinue
-if (-not $ttfs) { throw "No font files found in archive." }
+$files = Get-ChildItem -Path $tmp -Recurse -Include *.ttf, *.otf
+if (-not $files) { throw "No font files found in $FontFamily.zip" }
 
-$count = 0
-foreach ($f in $ttfs) {
-    # Prefer Mono Regular/Bold for terminals; install all still OK
+New-Item -ItemType Directory -Force -Path $fontsUser | Out-Null
+New-Item -Path $regKey -Force -ErrorAction SilentlyContinue | Out-Null
+foreach ($f in $files) {
     $dest = Join-Path $fontsUser $f.Name
     Copy-Item -LiteralPath $f.FullName -Destination $dest -Force
-    # Register with Windows Fonts folder (best-effort)
-    try {
-        $fontsNs.CopyHere($f.FullName, 0x10)
-    } catch { }
-    $count++
+    # A per-user font is only installed once it is registered under HKCU.
+    $kind = if ($f.Extension -eq '.otf') { 'OpenType' } else { 'TrueType' }
+    Set-ItemProperty -Path $regKey -Name "$($f.BaseName) ($kind)" -Value $dest
 }
 
-Write-Host "Installed/copied $count font file(s) to $fontsUser"
-Write-Host "Fully quit and reopen WezTerm so font caches refresh."
-Remove-Item $zip -Force -ErrorAction SilentlyContinue
+Remove-Item $zip, $tmp -Recurse -Force -ErrorAction SilentlyContinue
+Write-Host "Installed $($files.Count) font file(s) to $fontsUser"
+Write-Host "Fully quit and reopen WezTerm so it sees the new font."

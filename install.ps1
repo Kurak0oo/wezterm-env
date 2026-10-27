@@ -1,367 +1,347 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Deploy Kurak0oo/wezterm-env on Windows (WezTerm + PowerShell profile + fonts + optional trail).
+  Deploy Kurak0oo/wezterm-env on Windows (WezTerm config + PowerShell profile, optional font and cursor trail).
 
 .NOTES
-  Restricted / cybercafe machines often block scripts and break winget.
-  Always prefer:
-    powershell -ExecutionPolicy Bypass -File .\install.ps1 -WithCursorTrail
-  Or double-click install.cmd in the repo root.
+  Restricted / cybercafe machines block scripts and often break winget. Run through
+  install.cmd (always -ExecutionPolicy Bypass) or call powershell with Bypass yourself.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\install.ps1
-  powershell -ExecutionPolicy Bypass -File .\install.ps1 -WithCursorTrail -SkipWinget
+  .\install.cmd -WithCursorTrail
+  .\install.cmd -WithCursorTrail -SkipWinget
+  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Kurak0oo/wezterm-env/main/install.ps1))) -WithCursorTrail
 #>
 [CmdletBinding()]
 param(
     [switch]$WithCursorTrail,
+    [switch]$WithFont,
     [switch]$SkipWinget,
-    [switch]$SkipFonts,
+    # Re-download the pinned trail release even if a trail build is already installed.
+    [switch]$UpdateTrail,
     [switch]$BuildTrailFromSource,
-    # Do not default to $PSScriptRoot here: with [CmdletBinding()] the automatic
-    # variable is empty during parameter binding, which caused an infinite
-    # re-invoke loop (bootstrap -> Start-Process -> bootstrap ...).
+    # Kept so old command lines keep working; fonts are opt-in now (-WithFont).
+    [switch]$SkipFonts,
+    # Do not default to $PSScriptRoot here: with [CmdletBinding()] it is empty during
+    # parameter binding, which caused an infinite bootstrap re-invoke loop.
     [string]$RepoRoot
 )
 
-# Do not stop the whole install on one failed external tool (winget on locked PCs).
-$ErrorActionPreference = 'Continue'
+$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Older Windows PowerShell 5.1 installs default to TLS 1.0, which GitHub rejects.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-if (-not $RepoRoot) {
-    $RepoRoot = $PSScriptRoot
-}
-if (-not $RepoRoot -and $MyInvocation.MyCommand.Path) {
-    $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-}
+# Pinned trail release. Bump both lines together when publishing a new build.
+$TrailTag = 'v1.0.0'
+$TrailSha256 = '76ad8114a82d661a914d097750e1abffca63bb7bca82be69e2504b155db73b31'
+$TrailAsset = 'wezterm-trail-windows-x64.zip'
+$RepoUrl = 'https://github.com/Kurak0oo/wezterm-env'
+
+$script:Problems = [System.Collections.Generic.List[string]]::new()
 
 function Write-Step([string]$Msg) { Write-Host "`n=== $Msg ===" -ForegroundColor Cyan }
 function Write-Ok([string]$Msg) { Write-Host "  [ok] $Msg" -ForegroundColor Green }
-function Write-Warn2([string]$Msg) { Write-Host "  [!] $Msg" -ForegroundColor Yellow }
+function Write-Problem([string]$Msg) {
+    Write-Host "  [!] $Msg" -ForegroundColor Yellow
+    $script:Problems.Add($Msg)
+}
 
 function Test-WingetUsable {
-    $cmd = Get-Command winget -ErrorAction SilentlyContinue
-    if (-not $cmd) { return $false }
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { return $false }
     try {
-        $p = Start-Process -FilePath $cmd.Source -ArgumentList '--version' -Wait -PassThru -NoNewWindow -RedirectStandardOutput "$env:TEMP\winget-ver.txt" -RedirectStandardError "$env:TEMP\winget-ver.err"
-        return ($p.ExitCode -eq 0)
+        & winget --version | Out-Null
+        return ($LASTEXITCODE -eq 0)
     } catch {
         return $false
     }
 }
 
-function Ensure-WingetPkg([string]$Id, [string]$Name) {
-    try {
-        $list = & winget list --id $Id -e 2>$null | Out-String
-        if ($list -match [regex]::Escape($Id)) {
-            Write-Ok "$Name already installed"
-            return
-        }
-        Write-Host "  Installing $Name ($Id) ..."
-        & winget install --id $Id -e --accept-package-agreements --accept-source-agreements
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn2 "winget install failed for $Name (exit $LASTEXITCODE). Install manually if needed."
-        }
-    } catch {
-        Write-Warn2 "winget error for $Name : $($_.Exception.Message)"
+function Install-WingetPackage([string]$Id, [string]$Name) {
+    # Native stderr is never redirected: under Windows PowerShell 5.1 with
+    # ErrorActionPreference=Stop, redirected stderr lines become terminating errors.
+    $list = & winget list --id $Id -e --accept-source-agreements | Out-String
+    if ($LASTEXITCODE -eq 0 -and $list -match [regex]::Escape($Id)) {
+        Write-Ok "$Name already installed"
+        return
+    }
+    Write-Host "  Installing $Name ($Id) ..."
+    & winget install --id $Id -e --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) {
+        Write-Problem "winget install failed for $Name (exit $LASTEXITCODE). Install it manually if needed."
     }
 }
 
-function Backup-IfExists([string]$Path) {
-    if (Test-Path $Path) {
-        $bak = "$Path.bak.$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-        Copy-Item -LiteralPath $Path -Destination $bak -Force
+# Copy a managed file, keeping a timestamped backup only when the content actually changes.
+function Install-ManagedFile([string]$Source, [string]$Destination) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $Destination) | Out-Null
+    if (Test-Path -LiteralPath $Destination) {
+        if ((Get-FileHash -LiteralPath $Source).Hash -eq (Get-FileHash -LiteralPath $Destination).Hash) {
+            Write-Ok "Up to date: $Destination"
+            return
+        }
+        $bak = "$Destination.bak.$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        Copy-Item -LiteralPath $Destination -Destination $bak -Force
         Write-Host "  Backup: $bak"
     }
+    Copy-Item -LiteralPath $Source -Destination $Destination -Force
+    Write-Ok "Wrote $Destination"
 }
 
 function Get-RepoViaZip([string]$Dest) {
-    # No git required — works on cybercafe PCs after browser clone fails or for irm|iex
-    $zipUrl = 'https://github.com/Kurak0oo/wezterm-env/archive/refs/heads/main.zip'
+    $zipUrl = "$RepoUrl/archive/refs/heads/main.zip"
     $zip = Join-Path $env:TEMP 'wezterm-env-main.zip'
-    $extract = Join-Path $env:TEMP 'wezterm-env-extract'
+    $extract = Join-Path $env:TEMP "wezterm-env-extract-$([guid]::NewGuid().ToString('N'))"
     Write-Host "  Downloading $zipUrl ..."
     Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing
-    if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
     Expand-Archive -Path $zip -DestinationPath $extract -Force
     $inner = Get-ChildItem $extract -Directory | Select-Object -First 1
     if (-not $inner) { throw "Zip extract failed" }
-    if (Test-Path $Dest) { Remove-Item $Dest -Recurse -Force }
     New-Item -ItemType Directory -Force -Path (Split-Path $Dest) | Out-Null
     Move-Item $inner.FullName $Dest
-    Write-Ok "Repo ready at $Dest"
+    Remove-Item $zip, $extract -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+if (-not $RepoRoot) { $RepoRoot = $PSScriptRoot }
+
 # ---------------------------------------------------------------------------
-# Resolve repo root (local clone / zip / irm|iex)
+# Bootstrap: running from irm (no repo next to the script) -> fetch repo, re-run from it
 # ---------------------------------------------------------------------------
 if (-not $RepoRoot -or -not (Test-Path (Join-Path $RepoRoot 'config\wezterm.lua'))) {
     $clone = Join-Path $env:USERPROFILE 'src\wezterm-env'
-    Write-Step "Repo files not next to this script — fetching to $clone"
+    Write-Step "Fetching repo to $clone"
     if (Test-Path (Join-Path $clone 'config\wezterm.lua')) {
-        Write-Ok "Using existing $clone"
-    } elseif (Get-Command git -ErrorAction SilentlyContinue) {
-        try {
-            if (-not (Test-Path $clone)) {
-                git clone https://github.com/Kurak0oo/wezterm-env.git $clone
-            } else {
-                Push-Location $clone; git pull; Pop-Location
-            }
-        } catch {
-            Write-Warn2 "git failed: $($_.Exception.Message) — falling back to zip"
-            Get-RepoViaZip $clone
+        if ((Test-Path (Join-Path $clone '.git')) -and (Get-Command git -ErrorAction SilentlyContinue)) {
+            & git -C $clone pull --ff-only
+            if ($LASTEXITCODE -ne 0) { Write-Host "  git pull failed; using the existing copy" -ForegroundColor Yellow }
         }
     } else {
-        Write-Warn2 "git not in PATH — downloading zip from GitHub"
-        Get-RepoViaZip $clone
+        if (Test-Path $clone) {
+            # Never delete a folder we did not create; fetch next to it instead.
+            $clone = Join-Path $env:TEMP "wezterm-env-$([guid]::NewGuid().ToString('N'))"
+            Write-Host "  $env:USERPROFILE\src\wezterm-env exists but is not this repo; using $clone" -ForegroundColor Yellow
+        }
+        $cloned = $false
+        if (Get-Command git -ErrorAction SilentlyContinue) {
+            & git clone "$RepoUrl.git" $clone
+            $cloned = ($LASTEXITCODE -eq 0)
+            if (-not $cloned) {
+                Write-Host "  git clone failed; falling back to zip" -ForegroundColor Yellow
+                Remove-Item $clone -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+        if (-not $cloned) { Get-RepoViaZip $clone }
     }
-    $argList = @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass',
-        '-File', (Join-Path $clone 'install.ps1'),
-        '-RepoRoot', $clone
-    )
-    if ($WithCursorTrail) { $argList += '-WithCursorTrail' }
-    if ($SkipWinget) { $argList += '-SkipWinget' }
-    if ($SkipFonts) { $argList += '-SkipFonts' }
-    if ($BuildTrailFromSource) { $argList += '-BuildTrailFromSource' }
-    # Re-invoke with Bypass so nested call works under Restricted policy.
-    # Always pass -RepoRoot so the child never re-enters this bootstrap path.
-    $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Wait -PassThru -NoNewWindow
-    exit $p.ExitCode
+    Write-Ok "Repo ready at $clone"
+
+    $forward = @('-RepoRoot', $clone)
+    foreach ($name in 'WithCursorTrail', 'WithFont', 'SkipWinget', 'UpdateTrail', 'BuildTrailFromSource') {
+        if ($PSBoundParameters[$name]) { $forward += "-$name" }
+    }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $clone 'install.ps1') @forward
+    # `exit` would close the user's window when this runs from irm; only exit from a script file.
+    if ($PSCommandPath) { exit $LASTEXITCODE }
+    return
 }
+
+$RepoRoot = (Resolve-Path $RepoRoot).Path
+if ($SkipFonts) { $WithFont = $false }
 
 Write-Host @"
 
 === wezterm-env installer ===
 Repo:  $RepoRoot
-Trail: $WithCursorTrail
-User:  $env:USERPROFILE
-
+Trail: $WithCursorTrail   Font: $WithFont
 "@
+
+try {
+    & (Join-Path $RepoRoot 'scripts\Remove-LegacyInstall.ps1')
+} catch {
+    Write-Problem "Cleanup of old install failed: $($_.Exception.Message)"
+}
 
 # ---------------------------------------------------------------------------
 # 1) Packages (optional)
 # ---------------------------------------------------------------------------
-if (-not $SkipWinget) {
-    Write-Step "winget packages"
-    if (-not (Test-WingetUsable)) {
-        Write-Warn2 "winget missing or broken on this PC. Skipping package installs."
-        Write-Warn2 "Install WezTerm / PowerShell 7 / Oh My Posh manually if needed."
-        Write-Warn2 "Or re-run with: -SkipWinget"
-    } else {
-        Ensure-WingetPkg 'Microsoft.PowerShell' 'PowerShell 7'
-        Ensure-WingetPkg 'wez.wezterm' 'WezTerm (stock)'
-        Ensure-WingetPkg 'JanDeDobbeleer.OhMyPosh' 'Oh My Posh'
-    }
-} else {
+if ($SkipWinget) {
     Write-Step "winget packages (skipped)"
+} else {
+    Write-Step "winget packages"
+    if (Test-WingetUsable) {
+        Install-WingetPackage 'Microsoft.PowerShell' 'PowerShell 7'
+        Install-WingetPackage 'wez.wezterm' 'WezTerm'
+        Install-WingetPackage 'JanDeDobbeleer.OhMyPosh' 'Oh My Posh'
+    } else {
+        Write-Problem "winget missing or broken. Install WezTerm / PowerShell 7 / Oh My Posh manually, or re-run with -SkipWinget."
+    }
 }
 
 # ---------------------------------------------------------------------------
-# 2) Config
+# 2) WezTerm config + wallpaper folder
 # ---------------------------------------------------------------------------
 Write-Step "WezTerm config"
-$cfgSrc = Join-Path $RepoRoot 'config\wezterm.lua'
 $cfgDst = Join-Path $env:USERPROFILE '.wezterm.lua'
-Backup-IfExists $cfgDst
-Copy-Item $cfgSrc $cfgDst -Force
-Write-Ok "Wrote $cfgDst"
+try {
+    Install-ManagedFile (Join-Path $RepoRoot 'config\wezterm.lua') $cfgDst
+} catch {
+    Write-Problem "Could not write ${cfgDst}: $($_.Exception.Message)"
+}
 
 $bgDir = Join-Path $env:USERPROFILE '.config\wezterm\backgrounds'
 New-Item -ItemType Directory -Force -Path $bgDir | Out-Null
-$bgReadme = Join-Path $bgDir 'README.txt'
-@"
-Place bg.jpg here for wallpaper:
-  $bgDir\bg.jpg
-Also accepted: %USERPROFILE%\Pictures\WezTermBackgrounds\bg.jpg
-"@ | Set-Content $bgReadme -Encoding UTF8
-New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE 'Pictures\WezTermBackgrounds') | Out-Null
+$localBg = Get-ChildItem (Join-Path $RepoRoot 'assets\backgrounds') -Filter 'bg.*' -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -in '.jpg', '.png' } | Select-Object -First 1
+if ($localBg -and -not (Test-Path (Join-Path $bgDir $localBg.Name))) {
+    Copy-Item $localBg.FullName $bgDir
+    Write-Ok "Copied wallpaper $($localBg.Name) to $bgDir"
+}
 
 # ---------------------------------------------------------------------------
-# 3) PowerShell profile
+# 3) PowerShell profile: managed file + one dot-source line in each $PROFILE
 # ---------------------------------------------------------------------------
 Write-Step "PowerShell profile"
-$profSrc = Join-Path $RepoRoot 'profile\Microsoft.PowerShell_profile.ps1'
-# PS7+ uses Documents\PowerShell; Windows PowerShell 5.1 uses Documents\WindowsPowerShell.
-# With -SkipWinget, machines often only have 5.1 — write both.
-foreach ($profDir in @(
-        (Join-Path $env:USERPROFILE 'Documents\PowerShell'),
-        (Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell')
-    )) {
-    New-Item -ItemType Directory -Force -Path $profDir | Out-Null
-    $profDst = Join-Path $profDir 'Microsoft.PowerShell_profile.ps1'
-    Backup-IfExists $profDst
-    Copy-Item $profSrc $profDst -Force
-    Write-Ok "Wrote $profDst"
-}
+$envDir = Join-Path $env:USERPROFILE '.config\wezterm-env'
+$managedProfile = Join-Path $envDir 'profile.ps1'
+$profileMarker = '# wezterm-env (managed line, removed by uninstall.ps1)'
+$profileLine = "if (Test-Path `"`$HOME\.config\wezterm-env\profile.ps1`") { . `"`$HOME\.config\wezterm-env\profile.ps1`" } $profileMarker"
+try {
+    Install-ManagedFile (Join-Path $RepoRoot 'profile\Microsoft.PowerShell_profile.ps1') $managedProfile
 
-# ---------------------------------------------------------------------------
-# 4) Fonts (best-effort)
-# ---------------------------------------------------------------------------
-if (-not $SkipFonts) {
-    Write-Step "Nerd Font (0xProto)"
-    try {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'scripts\Install-NerdFont.ps1') -FontFamily '0xProto'
-    } catch {
-        Write-Warn2 "Font install failed: $($_.Exception.Message)"
-        Write-Warn2 "Manual: https://www.nerdfonts.com/font-downloads → 0xProto"
+    # Cache the prompt theme locally so new shells never hit the network.
+    $theme = Join-Path $envDir 'catppuccin_mocha.omp.json'
+    if (-not (Test-Path $theme)) {
+        try {
+            Invoke-WebRequest -UseBasicParsing -OutFile $theme `
+                -Uri 'https://raw.githubusercontent.com/JanDeDobbeleer/oh-my-posh/main/themes/catppuccin_mocha.omp.json'
+            Write-Ok "Cached Oh My Posh theme at $theme"
+        } catch {
+            Write-Problem "Could not download the Oh My Posh theme; the prompt falls back to the default theme."
+        }
     }
-} else {
-    Write-Step "Fonts (skipped)"
+
+    # PS7 uses Documents\PowerShell, Windows PowerShell 5.1 uses Documents\WindowsPowerShell.
+    # MyDocuments follows OneDrive folder redirection; $USERPROFILE\Documents does not.
+    $docs = [Environment]::GetFolderPath('MyDocuments')
+    foreach ($sub in 'PowerShell', 'WindowsPowerShell') {
+        $profPath = Join-Path $docs "$sub\Microsoft.PowerShell_profile.ps1"
+        New-Item -ItemType Directory -Force -Path (Split-Path $profPath) | Out-Null
+        $current = if (Test-Path $profPath) { Get-Content $profPath -Raw } else { '' }
+        if ($current -like "*$profileMarker*") {
+            Write-Ok "Already linked: $profPath"
+            continue
+        }
+        if ($current -like '*Installed by Kurak0oo/wezterm-env install.ps1*') {
+            # Older versions of this installer overwrote the whole profile; swap it for the link.
+            Copy-Item $profPath "$profPath.bak.$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+            Set-Content $profPath $profileLine -Encoding UTF8
+        } else {
+            Add-Content $profPath "`r`n$profileLine" -Encoding UTF8
+        }
+        Write-Ok "Linked $profPath"
+    }
+} catch {
+    Write-Problem "Profile setup failed: $($_.Exception.Message)"
 }
 
 # ---------------------------------------------------------------------------
-# 5) Cursor trail binary + launchers (always create .bat — no ExecutionPolicy)
+# 4) Font (opt-in: WezTerm already bundles JetBrains Mono + Nerd Font symbols)
 # ---------------------------------------------------------------------------
-$trailInstall = Join-Path $env:LOCALAPPDATA 'WezTerm-Trail'
-$binDir = Join-Path $env:USERPROFILE 'bin'
-New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+if ($WithFont) {
+    Write-Step "Nerd Font (0xProto)"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'scripts\Install-NerdFont.ps1') -FontFamily '0xProto'
+    if ($LASTEXITCODE -ne 0) {
+        Write-Problem "Font install failed. Manual: https://www.nerdfonts.com/font-downloads -> 0xProto"
+    }
+}
 
+# ---------------------------------------------------------------------------
+# 5) Cursor trail build + launcher
+# ---------------------------------------------------------------------------
 if ($WithCursorTrail) {
     Write-Step "Cursor trail WezTerm"
-    $gui = Join-Path $trailInstall 'wezterm-gui.exe'
-    $localCandidates = @(
-        (Join-Path $env:USERPROFILE 'src\wezterm-cursor-trail\target\release\wezterm-gui.exe'),
-        'C:\Users\Personal\Projects\wezterm-cursor-trail\target\release\wezterm-gui.exe'
-    )
-    $haveLocal = $localCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $trailDir = Join-Path $env:LOCALAPPDATA 'WezTerm-Trail'
+    $gui = Join-Path $trailDir 'wezterm-gui.exe'
+    $stamp = Join-Path $trailDir 'release.txt'
+    $installedTag = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { $null }
 
     if ($BuildTrailFromSource) {
-        try {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'scripts\Build-WezTerm-Trail.ps1') -InstallDir $trailInstall
-        } catch {
-            Write-Warn2 "Source build failed: $($_.Exception.Message)"
-        }
-    } elseif (-not (Test-Path $gui)) {
-        $gotRelease = $false
-        try {
-            Write-Host "  Downloading GitHub Release ..."
-            $api = 'https://api.github.com/repos/Kurak0oo/wezterm-env/releases/latest'
-            $rel = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'wezterm-env' }
-            $asset = $rel.assets | Where-Object { $_.name -match 'wezterm-trail.*\.zip' } | Select-Object -First 1
-            if ($asset) {
-                $zip = Join-Path $env:TEMP 'wezterm-trail.zip'
-                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
-                New-Item -ItemType Directory -Force -Path $trailInstall | Out-Null
-                Expand-Archive -Path $zip -DestinationPath $trailInstall -Force
-                # Zip may nest a folder
-                if (-not (Test-Path $gui)) {
-                    $nested = Get-ChildItem $trailInstall -Recurse -Filter 'wezterm-gui.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-                    if ($nested) {
-                        $nd = $nested.DirectoryName
-                        Copy-Item (Join-Path $nd 'wezterm*.exe') $trailInstall -Force
-                    }
-                }
-                $gotRelease = Test-Path $gui
-                if ($gotRelease) { Write-Ok "Installed from release: $($asset.name)" }
-            }
-        } catch {
-            Write-Warn2 "Release download failed: $($_.Exception.Message)"
-        }
-
-        if (-not $gotRelease -and $haveLocal) {
-            $ld = Split-Path $haveLocal
-            Write-Host "  Copying local build from $ld ..."
-            New-Item -ItemType Directory -Force -Path $trailInstall | Out-Null
-            Copy-Item (Join-Path $ld 'wezterm.exe') $trailInstall -Force -ErrorAction SilentlyContinue
-            Copy-Item (Join-Path $ld 'wezterm-gui.exe') $trailInstall -Force
-            Copy-Item (Join-Path $ld 'wezterm-mux-server.exe') $trailInstall -Force -ErrorAction SilentlyContinue
-        } elseif (-not $gotRelease) {
-            Write-Warn2 "Trail binary missing. Options:"
-            Write-Warn2 "  - Check https://github.com/Kurak0oo/wezterm-env/releases"
-            Write-Warn2 "  - Or: -BuildTrailFromSource (needs Rust/MSVC)"
-        }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'scripts\Build-WezTerm-Trail.ps1') -InstallDir $trailDir
+        if ($LASTEXITCODE -ne 0) { Write-Problem "Source build failed (exit $LASTEXITCODE)." }
+    } elseif ((Test-Path $gui) -and -not ($UpdateTrail -and $installedTag -ne $TrailTag)) {
+        Write-Ok "Trail already at $trailDir ($(if ($installedTag) { $installedTag } else { 'unknown version' }); -UpdateTrail to replace)"
     } else {
-        Write-Ok "Trail already at $trailInstall"
+        $zip = Join-Path $env:TEMP $TrailAsset
+        try {
+            $url = "$RepoUrl/releases/download/$TrailTag/$TrailAsset"
+            Write-Host "  Downloading $url ..."
+            Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+            $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne $TrailSha256) { throw "SHA256 mismatch (got $hash). Refusing to install." }
+
+            $unpack = Join-Path $env:TEMP "wezterm-trail-$([guid]::NewGuid().ToString('N'))"
+            Expand-Archive -Path $zip -DestinationPath $unpack -Force
+            $found = Get-ChildItem $unpack -Recurse -Filter 'wezterm-gui.exe' | Select-Object -First 1
+            if (-not $found) { throw "wezterm-gui.exe not found in $TrailAsset" }
+            New-Item -ItemType Directory -Force -Path $trailDir | Out-Null
+            Copy-Item (Join-Path $found.DirectoryName '*') $trailDir -Recurse -Force
+            Set-Content $stamp $TrailTag
+            Remove-Item $unpack -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Ok "Installed $TrailAsset ($TrailTag)"
+        } catch {
+            Write-Problem "Trail download failed: $($_.Exception.Message). See $RepoUrl/releases or use -BuildTrailFromSource."
+        } finally {
+            Remove-Item $zip -Force -ErrorAction SilentlyContinue
+        }
     }
 
-    # .ps1 launcher (for Bypass / Desktop shortcut)
-    $startPs1 = Join-Path $env:USERPROFILE 'Start-WezTerm-CursorTrail.ps1'
-    Copy-Item (Join-Path $RepoRoot 'scripts\Start-WezTerm-Trail.ps1') $startPs1 -Force
-
-    # .cmd / .bat — works under Restricted execution policy
-    $startBat = Join-Path $env:USERPROFILE 'Start-WezTerm-CursorTrail.bat'
+    # .bat launcher works under Restricted execution policy; config detects the trail build
+    # from its install folder, the env var is a second signal.
+    $startBat = Join-Path $trailDir 'Start-WezTerm-CursorTrail.bat'
+    New-Item -ItemType Directory -Force -Path $trailDir | Out-Null
     @"
 @echo off
-REM Launches trail WezTerm without PowerShell execution-policy issues
 set "WEZTERM_CURSOR_TRAIL=1"
-set "TRAIL=%LOCALAPPDATA%\WezTerm-Trail"
-if exist "%TRAIL%\wezterm-gui.exe" (
-  start "" "%TRAIL%\wezterm-gui.exe"
+if exist "%~dp0wezterm-gui.exe" (
+  start "" "%~dp0wezterm-gui.exe"
   exit /b 0
 )
-if exist "%TRAIL%\wezterm.exe" (
-  start "" "%TRAIL%\wezterm.exe"
-  exit /b 0
-)
-echo Trail binary not found under %TRAIL%
-echo Re-run: powershell -ExecutionPolicy Bypass -File "%~dp0..\workspace\wezterm-env\install.ps1" -WithCursorTrail
+echo Trail binary not found in %~dp0
+echo Re-run: "$RepoRoot\install.cmd" -WithCursorTrail
 pause
 exit /b 1
 "@ | Set-Content $startBat -Encoding ASCII
-    Write-Ok "Wrote $startBat  (double-click this — no Bypass needed)"
-
-    @"
-@echo off
-set "WEZTERM_CURSOR_TRAIL=1"
-set "PATH=%LOCALAPPDATA%\WezTerm-Trail;%PATH%"
-"%LOCALAPPDATA%\WezTerm-Trail\wezterm.exe" %*
-"@ | Set-Content (Join-Path $binDir 'wezterm-trail.cmd') -Encoding ASCII
+    Write-Ok "Wrote $startBat"
 
     try {
-        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-        if ($userPath -and $userPath -notlike '*WezTerm-Trail*') {
-            [Environment]::SetEnvironmentVariable('Path', "$trailInstall;$binDir;$userPath", 'User')
-            Write-Ok "Prepended trail dir to user PATH (new shells)"
-        }
-    } catch {
-        Write-Warn2 "Could not edit user PATH: $($_.Exception.Message)"
-    }
-
-    # Desktop shortcut → .bat (no ExecutionPolicy)
-    try {
+        $wsh = New-Object -ComObject WScript.Shell
         $desk = [Environment]::GetFolderPath('Desktop')
         if (-not $desk) { $desk = $env:USERPROFILE }
-        $wsh = New-Object -ComObject WScript.Shell
         $sc = $wsh.CreateShortcut((Join-Path $desk 'WezTerm Cursor Trail.lnk'))
         $sc.TargetPath = $startBat
         $sc.WorkingDirectory = $env:USERPROFILE
-        $sc.Description = 'WezTerm with cursor trail (no ExecutionPolicy needed)'
+        if (Test-Path $gui) { $sc.IconLocation = "$gui,0" }
+        $sc.Description = 'WezTerm with cursor trail'
         $sc.Save()
-        Write-Ok "Desktop shortcut → $startBat"
+        Write-Ok "Desktop shortcut: WezTerm Cursor Trail"
     } catch {
-        Write-Warn2 "Desktop shortcut failed: $($_.Exception.Message)"
+        Write-Problem "Desktop shortcut failed: $($_.Exception.Message)"
     }
 }
 
-# Repo-local install.cmd helper for next time
-$installCmd = Join-Path $RepoRoot 'install.cmd'
-@"
-@echo off
-REM Always Bypass so Restricted PCs can install
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" %*
-"@ | Set-Content $installCmd -Encoding ASCII
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+Write-Host "`n=== Summary ===" -ForegroundColor Cyan
+Write-Host "Config:  $cfgDst"
+Write-Host "Profile: $managedProfile (linked from `$PROFILE)"
+Write-Host "Wallpaper (optional): $bgDir\bg.jpg"
+if ($WithCursorTrail) { Write-Host "Trail:   double-click 'WezTerm Cursor Trail' on the desktop" }
+if ($WithFont) { Write-Host "Fully quit WezTerm so it picks up the new font." }
 
-Write-Host @"
-
-=== Done ===
-Config:  $cfgDst
-Profile: $profDst
-Wallpaper: $bgDir\bg.jpg  (optional)
-
-Launch (stock WezTerm):
-  wezterm
-
-Launch (cursor trail) — pick one:
-  1) Double-click:  $env:USERPROFILE\Start-WezTerm-CursorTrail.bat
-  2) Desktop:       WezTerm Cursor Trail
-  3) powershell -ExecutionPolicy Bypass -File `$env:USERPROFILE\Start-WezTerm-CursorTrail.ps1
-
-Restricted PC tips:
-  - Always: powershell -ExecutionPolicy Bypass -File .\install.ps1 ...
-  - Or:     .\install.cmd -WithCursorTrail
-  - If winget breaks: .\install.cmd -WithCursorTrail -SkipWinget
-  - Fully quit WezTerm after font install
-
-"@
+if ($script:Problems.Count -gt 0) {
+    Write-Host "`nFinished with $($script:Problems.Count) problem(s):" -ForegroundColor Yellow
+    $script:Problems | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+    if ($PSCommandPath) { exit 1 }
+} else {
+    Write-Host "`nDone." -ForegroundColor Green
+}

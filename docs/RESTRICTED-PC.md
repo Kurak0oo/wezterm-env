@@ -1,94 +1,58 @@
 # Restricted / cybercafe Windows PCs
 
-Typical failures when using **wezterm-env** on locked machines, and how to fix them.
+Typical failures on locked machines and how to get around them.
 
-## 1. `禁止运行脚本` / Execution Policy
+## Recommended flow
+
+1. Clone or download the repo ZIP to a **writable** folder (`U:\`, USB stick, Documents).
+2. Run:
+   ```powershell
+   .\install.cmd -WithCursorTrail -SkipWinget
+   ```
+3. Start WezTerm from the desktop shortcut **WezTerm Cursor Trail**.
+
+The installer prints a list of anything that failed at the end and exits with code 1 if something did.
+
+## 1. `禁止运行脚本` / execution policy
 
 ```text
 无法加载文件 ...\install.ps1，因为在此系统上禁止运行脚本
 ```
 
-**Fix (always works for one run):**
+Use `install.cmd`, which always runs the installer with `-ExecutionPolicy Bypass`, or:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -WithCursorTrail
 ```
 
-Or double-click / run:
-
-```text
-install.cmd -WithCursorTrail
-```
-
-**Launch trail without policy issues:**
-
-```text
-%USERPROFILE%\Start-WezTerm-CursorTrail.bat
-```
-
-Do **not** rely on bare `.\install.ps1` or `powershell -File ...ps1` under Restricted.
-
----
+The trail launcher is a `.bat` file, so it runs without any policy change.
 
 ## 2. winget crashes / `无法启动此应用程序`
 
-winget may be installed but broken under the cafe account.
+winget may be installed but broken under the cafe account. Add `-SkipWinget` and install WezTerm yourself
+if it's missing (portable ZIP from wezterm.org, or ask staff). The trail build is self-contained, so you
+don't need stock WezTerm to use it.
 
-**Fix:** skip package manager; only deploy configs + trail zip:
+## 3. No git
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -WithCursorTrail -SkipWinget -SkipFonts
-```
-
-Install WezTerm / pwsh yourself if missing (portable zip or ask staff).
-
----
-
-## 3. `git` not found with `irm | iex`
-
-The online installer no longer requires git: it downloads a **zip** of the repo if git is missing.
-
-Still simplest on a PC where you already cloned with GitHub Desktop / zip extract:
+The online installer doesn't need git; it falls back to downloading the repo ZIP:
 
 ```powershell
-cd U:\workspace\wezterm-env
-.\install.cmd -WithCursorTrail -SkipWinget
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Kurak0oo/wezterm-env/main/install.ps1))) -WithCursorTrail -SkipWinget
 ```
 
----
+## 4. WezTerm: `pwsh.exe ... exited with code 1`
 
-## 4. WezTerm: `pwsh.exe ... Exited with code 1` / CloseOnCleanExit
-
-Usually the PowerShell **profile** printed errors or set a bad exit code.
-
-Current profile is fail-soft and clears `$LASTEXITCODE`. Config sets `exit_behavior = 'Close'`.
-
-If pwsh is not installed:
-
-```lua
--- in %USERPROFILE%\.wezterm.lua
-config.default_prog = { 'powershell.exe', '-NoLogo' }
-```
-
----
-
-## 5. Recommended cybercafe flow
-
-1. Clone or download zip of `wezterm-env` to a **writable** path (`U:\`, USB, Documents).
-2. Run:
-   ```powershell
-   .\install.cmd -WithCursorTrail -SkipWinget
-   ```
-3. Ensure trail binary downloaded (needs internet for GitHub Releases).
-4. Start with **Start-WezTerm-CursorTrail.bat** or desktop shortcut.
-5. Optional: copy your own `bg.jpg` to `%USERPROFILE%\.config\wezterm\backgrounds\`.
+The config falls back to Windows PowerShell when PowerShell 7 isn't installed. If the shell still exits,
+open `powershell -NoProfile` and run `. $HOME\.config\wezterm-env\profile.ps1`: the profile now prints
+its errors instead of hiding them.
 
 ## What usually works without admin
 
 | Step | Needs admin? |
-|------|----------------|
+|------|--------------|
 | Copy `.wezterm.lua` + profile | No |
-| Download trail zip to `%LOCALAPPDATA%` | No (user write) |
-| User font install | Often no |
-| winget install apps | Often **yes** / blocked |
-| Build trail from source | Yes (tools) |
+| Trail ZIP to `%LOCALAPPDATA%` | No |
+| Per-user font (`-WithFont`) | No |
+| winget installs | Often **yes** / blocked |
+| Build trail from source | Yes (toolchain installs) |
